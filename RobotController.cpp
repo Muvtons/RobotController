@@ -7,6 +7,11 @@ RobotController::RobotController() {
   _instance = this;
 }
 
+void RobotController::begin() {
+  Config defaultConfig;
+  begin(defaultConfig);
+}
+
 void RobotController::begin(const Config& config) {
   _config = config;
   _initHardware();
