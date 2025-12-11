@@ -1,5 +1,9 @@
 #include "RobotController.h"
 #include <Arduino.h>
+#include <stdarg.h>
+
+// Global mutex for serial access
+SemaphoreHandle_t serialMutex = NULL;
 
 RobotController* RobotController::_instance = nullptr;
 
@@ -15,10 +19,24 @@ void RobotController::begin() {
 void RobotController::begin(const Config& config) {
   _config = config;
   _initHardware();
+  
+  // Initialize serial mutex (only once)
+  if (serialMutex == NULL) {
+    serialMutex = xSemaphoreCreateMutex();
+    if (serialMutex == NULL) {
+      // Fallback - but this should never happen
+      while (true) {
+        Serial.begin(115200);
+        Serial.println("FATAL: Failed to create serial mutex");
+        delay(1000);
+      }
+    }
+  }
+  
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n🤖 Robot Controller Ready!");
-  Serial.println("Commands: move_forward, turn_left 90, turn_right 90, STOP");
+  safePrintln("\n🤖 Robot Controller Ready on Core 0!");
+  safePrintln("Commands: move_forward, turn_left 90, turn_right 90, STOP");
 }
 
 void RobotController::_initHardware() {
@@ -113,9 +131,40 @@ float RobotController::_getTurnSlowdownStart(float deg) {
   return 0.60;
 }
 
+void RobotController::_monitorMovement(long l, long r, long avg, long target, bool slowdownPhase, float slowdown_progress) {
+  static unsigned long lastMonitor = 0;
+  if (millis() - lastMonitor >= 100) {
+    long error = l - r;
+    float progress = (float)avg / target * 100;
+    const char* phase = slowdownPhase ? "SLOWDOWN" : "CRUISING";
+    safePrintf("Progress: %.1f%% | L=%ld R=%ld | Error=%ld | %s\n",
+              progress, l, r, error, phase);
+    lastMonitor = millis();
+  }
+}
+
+void RobotController::_reportCompletion(long finalL, long finalR, long target, bool interrupted, bool isTurn) {
+  long actualAvg = (finalL + finalR) / 2;
+  float overshootPercent = ((float)actualAvg / target - 1.0f) * 100.0f;
+  
+  if (interrupted) {
+    if (isTurn) {
+      safePrintf("  ✗ TURN ABORTED by STOP: L=%ld R=%ld | Avg=%ld (target=%ld)\n", 
+                abs(finalL), abs(finalR), actualAvg, target);
+    } else {
+      safePrintf("  ✗ MOVE ABORTED by STOP: L=%ld R=%ld | Avg=%ld (target=%ld)\n", 
+                finalL, finalR, actualAvg, target);
+    }
+  } else {
+    safePrintf("  ✓ Complete: L=%ld R=%ld | Avg=%ld (target=%ld)\n", 
+              finalL, finalR, actualAvg, target);
+    safePrintf("  Overshoot: %.1f%%\n\n", overshootPercent);
+  }
+}
+
 void RobotController::_moveStraight(float distanceMM, bool forward) {
   if (_inCriticalTurn) {
-    Serial.println(">> Move blocked (turn in progress)");
+    safePrintln(">> Move blocked (turn in progress)");
     return;
   }
   
@@ -130,16 +179,15 @@ void RobotController::_moveStraight(float distanceMM, bool forward) {
   _setMotorDirection(forward);
   _setMotorSpeeds(_config.moveSpeed, _config.moveSpeed);
 
-  Serial.printf("Moving %.0fmm %s (target: %ld pulses)\n", 
-                distanceMM, forward ? "FORWARD" : "BACKWARD", target);
+  safePrintf("Moving %.0fmm %s (target: %ld pulses)\n", 
+            distanceMM, forward ? "FORWARD" : "BACKWARD", target);
 
-  unsigned long lastMonitor = millis();
   unsigned long lastPIDCalc = millis();
   bool slowdownPhase = false;
 
   while (1) {
     if (_stopRequested) {
-      Serial.println(">> STOP requested during straight move");
+      safePrintln(">> STOP requested during straight move");
       break;
     }
     
@@ -159,6 +207,8 @@ void RobotController::_moveStraight(float distanceMM, bool forward) {
       float current_speed = _config.moveSpeed - (_config.moveSpeed - 5.0) * slowdown_progress;
       _setMotorSpeeds(current_speed, current_speed);
       lastPIDCalc = millis();
+      
+      _monitorMovement(l, r, avg, target, slowdownPhase, slowdown_progress);
       continue;
     }
 
@@ -192,14 +242,7 @@ void RobotController::_moveStraight(float distanceMM, bool forward) {
       lastPIDCalc = millis();
     }
 
-    if (millis() - lastMonitor >= 100) {
-      long error = l - r;
-      float progress = (float)avg / target * 100;
-      const char* phase = slowdownPhase ? "SLOWDOWN" : "CRUISING";
-      Serial.printf("Progress: %.1f%% | L=%ld R=%ld | Error=%ld | %s\n",
-                    progress, l, r, error, phase);
-      lastMonitor = millis();
-    }
+    _monitorMovement(l, r, avg, target, slowdownPhase, 0.0f);
     
     delay(1);
   }
@@ -210,18 +253,16 @@ void RobotController::_moveStraight(float distanceMM, bool forward) {
   long finalL, finalR;
   _getEncoderCounts(finalL, finalR);
   long finalError = finalL - finalR;
-  long actualAvg = (finalL + finalR) / 2;
-  float overshootPercent = ((float)actualAvg / target - 1.0f) * 100.0f;
   
-  Serial.printf("  ✓ Complete: L=%ld R=%ld | Avg=%ld (target=%ld) | Error=%ld (%.1fmm)\n", 
-                finalL, finalR, actualAvg, target,
-                finalError, finalError * (PI * _config.wheelDiameter / (24 * 30)));
-  Serial.printf("  Overshoot: %.1f%%\n\n", overshootPercent);
+  _reportCompletion(finalL, finalR, target, _stopRequested, false);
+  
+  // Reset stop flag after movement
+  _stopRequested = false;
 }
 
 void RobotController::_turn(float degrees, bool rightTurn) {
   if (_inCriticalTurn) {
-    Serial.println(">> Turn command ignored (another turn in progress)");
+    safePrintln(">> Turn command ignored (another turn in progress)");
     return;
   }
   
@@ -243,17 +284,16 @@ void RobotController::_turn(float degrees, bool rightTurn) {
   digitalWrite(_config.rightDirPin, rightTurn ? LOW : HIGH);
   _setMotorSpeeds(_config.turnSpeed, _config.turnSpeed);
 
-  Serial.printf("Turning %.0f° %s (target: %ld pulses, slowdown at: %d%%)\n", 
-                degrees, rightTurn ? "RIGHT" : "LEFT", target, (int)(slowdown_percent * 100));
+  safePrintf("Turning %.0f° %s (target: %ld pulses, slowdown at: %d%%)\n", 
+            degrees, rightTurn ? "RIGHT" : "LEFT", target, (int)(slowdown_percent * 100));
 
-  unsigned long lastMonitor = millis();
   unsigned long lastPIDCalc = millis();
   bool slowdownPhase = false;
   bool interrupted = false;
 
   while (1) {
     if (_stopRequested) {
-      Serial.println(">> STOP received during turn - aborting immediately");
+      safePrintln(">> STOP received during turn - aborting immediately");
       interrupted = true;
       break;
     }
@@ -268,7 +308,7 @@ void RobotController::_turn(float degrees, bool rightTurn) {
 
     if (avg >= slowdown_start && !slowdownPhase) {
       slowdownPhase = true;
-      Serial.printf("  >> SLOWDOWN ACTIVATED (%d%%) <<\n", (int)(slowdown_percent * 100));
+      safePrintf("  >> SLOWDOWN ACTIVATED (%d%%) <<\n", (int)(slowdown_percent * 100));
     }
 
     if (millis() - lastPIDCalc >= 50) {
@@ -309,14 +349,7 @@ void RobotController::_turn(float degrees, bool rightTurn) {
       lastPIDCalc = millis();
     }
 
-    if (millis() - lastMonitor >= 100) {
-      long error = l - r;
-      float progress = (float)avg / target * 100;
-      const char* phase = slowdownPhase ? "SLOWDOWN" : "CRUISING";
-      Serial.printf("  Progress: %.1f%% | L=%ld R=%ld | Error=%ld | %s\n",
-                    progress, l, r, error, phase);
-      lastMonitor = millis();
-    }
+    _monitorMovement(l, r, avg, target, slowdownPhase, slowdown_progress);
   }
 
   _stopRobot();
@@ -325,16 +358,8 @@ void RobotController::_turn(float degrees, bool rightTurn) {
   long finalL, finalR;
   _getEncoderCounts(finalL, finalR);
   long actualAvg = (abs(finalL) + abs(finalR)) / 2;
-  float overshootPercent = ((float)actualAvg / target - 1.0f) * 100.0f;
   
-  if (interrupted) {
-    Serial.printf("  ✗ TURN ABORTED by STOP: L=%ld R=%ld | Avg=%ld (target=%ld)\n", 
-                  abs(finalL), abs(finalR), actualAvg, target);
-  } else {
-    Serial.printf("  ✓ Complete: L=%ld R=%ld | Avg=%ld (target=%ld)\n", 
-                  abs(finalL), abs(finalR), actualAvg, target);
-    Serial.printf("  Overshoot: %.1f%%\n\n", overshootPercent);
-  }
+  _reportCompletion(abs(finalL), abs(finalR), target, interrupted, true);
   
   _inCriticalTurn = false;
   _stopRequested = false;
@@ -349,7 +374,7 @@ void RobotController::_processSerial() {
         _inputString.trim();
         if (_inputString.equalsIgnoreCase("STOP")) {
           _stopRequested = true;
-          Serial.println(">> STOP registered during turn");
+          safePrintln(">> STOP registered during turn");
         }
         _inputString = "";
       } else if (_inputString.length() < 20) {
@@ -371,13 +396,11 @@ void RobotController::_processCommand(String cmd) {
   if (cmd == "") return;
 
   if (_inCriticalTurn) {
-    Serial.println(">> Command ignored (turn in progress)");
+    safePrintln(">> Command ignored (turn in progress)");
     return;
   }
 
-  Serial.print("Executing: [");
-  Serial.print(cmd);
-  Serial.println("]");
+  safePrintf("Executing: [%s]\n", cmd.c_str());
 
   if (cmd.equalsIgnoreCase("move_forward")) {
     _moveStraight(1000.0, true);
@@ -409,11 +432,11 @@ void RobotController::_processCommand(String cmd) {
 
   if (cmd.equalsIgnoreCase("STOP")) {
     _stopRequested = true;
-    Serial.println(">> STOPPED by command");
+    safePrintln(">> STOPPED by command");
     return;
   }
 
-  Serial.println(">> Unknown command");
+  safePrintln(">> Unknown command");
 }
 
 void IRAM_ATTR RobotController::_isrLeft() {
@@ -444,7 +467,7 @@ void RobotController::enableSerialControl(bool enable) {
   _serialControlEnabled = enable;
 }
 
-void RobotController::loop() {
+void RobotController::run() {
   if (_serialControlEnabled && (_stringComplete || Serial.available())) {
     if (_stringComplete) {
       _processCommand(_inputString);
@@ -457,5 +480,82 @@ void RobotController::loop() {
   static unsigned long lastStatus = 0;
   if (!_inCriticalTurn && millis() - lastStatus > 2000) {
     lastStatus = millis();
+  }
+}
+
+void RobotController::safePrint(const char* str) {
+  if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    Serial.print(str);
+    xSemaphoreGive(serialMutex);
+  }
+}
+
+void RobotController::safePrintln(const char* str) {
+  if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    Serial.println(str);
+    xSemaphoreGive(serialMutex);
+  }
+}
+
+void RobotController::safePrintf(const char* format, ...) {
+  if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    char buffer[128];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    Serial.print(buffer);
+    xSemaphoreGive(serialMutex);
+  }
+}
+
+// Global functions for Core 1
+void safeSerialPrint(const char* str) {
+  if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    Serial.print(str);
+    xSemaphoreGive(serialMutex);
+  }
+}
+
+void safeSerialPrintln(const char* str) {
+  if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    Serial.println(str);
+    xSemaphoreGive(serialMutex);
+  }
+}
+
+void safeSerialPrintf(const char* format, ...) {
+  if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    char buffer[128];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    Serial.print(buffer);
+    xSemaphoreGive(serialMutex);
+  }
+}
+
+void core1Task(void* param) {
+  safeSerialPrintln("\n🚀 Core 1 Task Started!");
+  safeSerialPrintf("Core 1 ID: %d\n", xPortGetCoreID());
+  
+  uint32_t counter = 0;
+  while (true) {
+    // Example Core 1 functionality - replace with your actual code
+    if (counter % 50 == 0) { // Every 5 seconds
+      safeSerialPrintf("[Core1] System Status: Heap=%d, Uptime=%lu seconds\n", 
+                      ESP.getFreeHeap(), millis()/1000);
+      
+      // Example: Read sensors, process data, etc.
+      float temperature = 25.0 + sin(millis()/10000.0) * 5.0; // Simulated temp
+      float battery = 3.7 + cos(millis()/15000.0) * 0.3;       // Simulated battery
+      
+      safeSerialPrintf("[Core1] Sensors: Temp=%.1f°C, Battery=%.2fV\n", 
+                      temperature, battery);
+    }
+    
+    counter++;
+    vTaskDelay(pdMS_TO_TICKS(100)); // 100ms delay
   }
 }
