@@ -6,30 +6,52 @@
 
 class RobotController {
 public:
-  // Simplified configuration structure
+  // Configuration structure (must be fully defined before use)
   struct Config {
-    float wheelDiameter = 200.0;    // mm
-    float wheelBase = 600.0;        // mm
-    float moveSpeed = 65.0;         // %
-    float turnSpeed = 50.0;         // %
-    float linearCalibration = 0.895;
-    float turnCalibration = 0.55;
-    float kp = 0.5;                 // PID gains
-    float ki = 0.02;
-    float kd = 0.15;
-    float maxCorrection = 15.0;     // Max PWM correction %
-    uint8_t leftEncoderPin = 2;
-    uint8_t rightEncoderPin = 3;
-    uint8_t leftPWMPin = 5;
-    uint8_t rightPWMPin = 6;
-    uint8_t leftDirPin = 7;
-    uint8_t rightDirPin = 8;
-    uint8_t leftBrakePin = 9;
-    uint8_t rightBrakePin = 10;
+    float wheelDiameter;
+    float wheelBase;
+    float moveSpeed;
+    float turnSpeed;
+    float linearCalibration;
+    float turnCalibration;
+    float kp;
+    float ki;
+    float kd;
+    float maxCorrection;
+    uint8_t leftEncoderPin;
+    uint8_t rightEncoderPin;
+    uint8_t leftPWMPin;
+    uint8_t rightPWMPin;
+    uint8_t leftDirPin;
+    uint8_t rightDirPin;
+    uint8_t leftBrakePin;
+    uint8_t rightBrakePin;
+    
+    // Constructor with default values
+    Config() : 
+      wheelDiameter(200.0),
+      wheelBase(600.0),
+      moveSpeed(65.0),
+      turnSpeed(50.0),
+      linearCalibration(0.895),
+      turnCalibration(0.55),
+      kp(0.5),
+      ki(0.02),
+      kd(0.15),
+      maxCorrection(15.0),
+      leftEncoderPin(2),
+      rightEncoderPin(3),
+      leftPWMPin(5),
+      rightPWMPin(6),
+      leftDirPin(7),
+      rightDirPin(8),
+      leftBrakePin(9),
+      rightBrakePin(10) {}
   };
 
   RobotController();
-  void begin(const Config& config = Config());
+  void begin(); // Default configuration
+  void begin(const Config& config); // Custom configuration
   void moveForward(float distanceMM);
   void turnLeft(float degrees);
   void turnRight(float degrees);
