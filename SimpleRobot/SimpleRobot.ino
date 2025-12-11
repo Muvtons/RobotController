@@ -3,13 +3,28 @@
 RobotController robot;
 
 void setup() {
-  robot.begin(); // Initialize with default settings
+  // Initialize robot on Core 0
+  robot.begin();
+  
+  // Create and start Core 1 task
+  xTaskCreatePinnedToCore(
+    core1Task,          // Function to run
+    "Core1Task",        // Task name
+    4096,               // Stack size (bytes)
+    NULL,               // Task parameters
+    1,                  // Priority (higher number = higher priority)
+    NULL,               // Task handle
+    1                   // Core ID (Core 1)
+  );
+  
+  robot.safePrintln("\n✅ Multi-Core System Initialized!");
+  robot.safePrintf("Core 0 ID: %d\n", xPortGetCoreID());
 }
 
 void loop() {
-  robot.moveForward(1000); // Move forward 1 meter
-  delay(2000);             // Wait 2 seconds
-  robot.turnRight(90);     // Turn right 90 degrees
-  delay(2000);             // Wait 2 seconds
-  robot.loop();            // Handle background tasks
+  // Core 0 runs robot control
+  robot.run();
+  
+  // Small delay to prevent watchdog trigger
+  delay(1);
 }
