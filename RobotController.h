@@ -3,10 +3,15 @@
 
 #include <Arduino.h>
 #include "driver/ledc.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+
+// Global mutex for serial access
+extern SemaphoreHandle_t serialMutex;
 
 class RobotController {
 public:
-  // Configuration structure (must be fully defined before use)
   struct Config {
     float wheelDiameter;
     float wheelBase;
@@ -27,7 +32,6 @@ public:
     uint8_t leftBrakePin;
     uint8_t rightBrakePin;
     
-    // Constructor with default values
     Config() : 
       wheelDiameter(200.0),
       wheelBase(600.0),
@@ -57,8 +61,13 @@ public:
   void turnRight(float degrees);
   void stop();
   void enableSerialControl(bool enable = true);
-  void loop(); // Must be called in main loop
+  void run(); // Main control loop (call from Core 0 task)
 
+  // Thread-safe serial functions
+  void safePrint(const char* str);
+  void safePrintln(const char* str);
+  void safePrintf(const char* format, ...);
+  
 private:
   Config _config;
   volatile long _encL = 0;
@@ -72,7 +81,6 @@ private:
   float _integral = 0;
   unsigned long _lastPIDTime = 0;
   
-  // Internal methods
   void _initHardware();
   void _setMotorSpeeds(float left, float right);
   void _stopRobot();
@@ -87,10 +95,19 @@ private:
   void _processSerial();
   void _processCommand(String cmd);
   
-  // ISR handlers
   static void IRAM_ATTR _isrLeft();
   static void IRAM_ATTR _isrRight();
   static RobotController* _instance;
+
+  // Helper functions for movement monitoring
+  void _monitorMovement(long l, long r, long avg, long target, bool slowdownPhase, float slowdown_progress);
+  void _reportCompletion(long finalL, long finalR, long target, bool interrupted = false, bool isTurn = false);
 };
+
+// Global functions for Core 1 tasks
+void core1Task(void* param);
+void safeSerialPrint(const char* str);
+void safeSerialPrintln(const char* str);
+void safeSerialPrintf(const char* format, ...);
 
 #endif
